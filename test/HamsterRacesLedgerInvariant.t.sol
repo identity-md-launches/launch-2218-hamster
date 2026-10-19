@@ -171,11 +171,9 @@ contract LedgerHandler is Test {
                 _violate("non-sponsor reclaimed rewards");
             } catch {}
         } else if (kind == 3) {
-            // Sponsor reclaims while losers are owed rewards or the race is open.
-            if (race.status == HamsterRaces.Status.Cancelled) return;
-            if (race.status == HamsterRaces.Status.Settled && race.totalStaked == races.stakes(id, race.winner)) {
-                return;
-            }
+            // Sponsor reclaims while the race is open, before resolveBy while losers share a pool, or when
+            // everything left is owed to losers.
+            if (_reclaimable(race)) return;
             vm.prank(owner);
             try races.reclaimRewards(id, owner) {
                 _violate("sponsor reclaimed owed or active rewards");
@@ -258,12 +256,25 @@ contract LedgerHandler is Test {
 
     function _reclaim(uint256 id) private {
         HamsterRaces.Race memory race = races.getRace(id);
-        if (race.status == HamsterRaces.Status.Open || race.rewardsRemaining == 0) return;
-        if (race.status == HamsterRaces.Status.Settled && race.totalStaked != races.stakes(id, race.winner)) return;
+        if (!_reclaimable(race)) return;
         vm.prank(owner);
         uint256 amount = races.reclaimRewards(id, owner);
+        HamsterRaces.Race memory after_ = races.getRace(id);
+        if (after_.lossRewardRemaining != race.lossRewardRemaining) _violate("reclaim took unclaimed loss rewards");
+        if (amount != race.rewardsRemaining - race.lossRewardRemaining) _violate("reclaim amount != unowed rewards");
         reclaimedByRace[id] += amount;
         reclaimedRewards += amount;
+    }
+
+    /// @dev The documented reclaim rule: a final race, not a settled race with a loss pool before resolveBy, and
+    ///      something left beyond what losers are still owed.
+    function _reclaimable(HamsterRaces.Race memory race) private view returns (bool) {
+        if (race.status == HamsterRaces.Status.Open) return false;
+        if (race.status == HamsterRaces.Status.Settled && race.lossRewardPool != 0 && block.timestamp < race.resolveBy)
+        {
+            return false;
+        }
+        return race.rewardsRemaining > race.lossRewardRemaining;
     }
 
     function _observe(uint256 id) private {
@@ -355,6 +366,22 @@ contract HamsterRacesLedgerInvariantTest is Test {
                 race.rewardBudget,
                 "race budget leaked"
             );
+            assertLe(race.lossRewardRemaining, race.rewardsRemaining, "loss rewards exceed escrow");
+            if (race.status == HamsterRaces.Status.Settled) {
+                uint256 losing = race.totalStaked - races.stakes(id, race.winner);
+                assertEq(race.lossRewardPool, race.rewardBudget * losing / race.totalStaked, "loss pool != R*L/T");
+                // Losers are paid only from the pool, and the sponsor only from what is outside it.
+                assertEq(
+                    race.lossRewardRemaining + handler.rewardsPaidByRace(id), race.lossRewardPool, "loss pool leaked"
+                );
+                assertLe(handler.reclaimedByRace(id), race.rewardBudget - race.lossRewardPool, "sponsor took loss pool");
+                if (block.timestamp < race.resolveBy && race.lossRewardPool != 0) {
+                    assertEq(handler.reclaimedByRace(id), 0, "reclaimed before resolveBy");
+                }
+            } else {
+                assertEq(race.lossRewardPool, 0, "unsettled race has a loss pool");
+                assertEq(handler.rewardsPaidByRace(id), 0, "unsettled race paid loss rewards");
+            }
         }
     }
 
@@ -412,10 +439,12 @@ contract HamsterRacesLedgerInvariantTest is Test {
                     assertLe(ethPaid, fair + n, "winner paid more than share plus dust");
                     assertEq(rewardPaid, 0);
                 } else {
-                    uint256 fairReward = race.rewardBudget * stake / (race.totalStaked - winningStake);
+                    uint256 fairReward = race.lossRewardPool * stake / (race.totalStaked - winningStake);
                     assertEq(ethPaid, 0, "loser received ETH");
                     assertGe(rewardPaid, fairReward, "loser reward below proportional share");
                     assertLe(rewardPaid, fairReward + n, "loser reward above share plus dust");
+                    // The cap: at most rewardBudget / totalStaked per losing wei, plus dust.
+                    assertLe(rewardPaid, race.rewardBudget * stake / race.totalStaked + n, "loser reward above cap");
                 }
             }
         }

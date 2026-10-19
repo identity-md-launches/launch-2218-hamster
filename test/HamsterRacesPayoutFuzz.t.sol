@@ -66,16 +66,48 @@ contract HamsterRacesPayoutFuzzTest is RaceTestBase {
         } else {
             _claimSettled(amounts, picks, winner, orderSeed);
         }
+        _reclaimRest();
         HamsterRaces.Race memory done = races.getRace(raceId);
         assertEq(done.ethRemaining, 0);
+        assertEq(done.rewardsRemaining, 0);
+        assertEq(done.lossRewardRemaining, 0);
         assertEq(done.winnerStakeRemaining, 0);
         assertEq(done.loserStakeRemaining, 0);
         assertEq(address(races).balance, 0);
         assertEq(races.ethLiability(), 0);
+        // Only the setUp race's escrow, now fully paid or reclaimed, is gone; nothing is stranded.
+        assertEq(races.rewardLiability(), 0);
+        assertEq(token.balanceOf(address(races)), 0);
         _assertSolvent();
     }
 
+    /// @dev The sponsor's share R - P is locked until resolveBy whenever losers share a nonzero pool, then
+    ///      reclaimable exactly once; a race with nothing unowed left refuses.
+    function _reclaimRest() internal {
+        HamsterRaces.Race memory race = races.getRace(raceId);
+        uint256 rest = race.rewardsRemaining - race.lossRewardRemaining;
+        if (race.status == HamsterRaces.Status.Settled && race.lossRewardPool != 0) {
+            vm.warp(race.resolveBy - 1);
+            vm.prank(owner);
+            vm.expectRevert(HamsterRaces.NoRefundableRewards.selector);
+            races.reclaimRewards(raceId, owner);
+            vm.warp(race.resolveBy);
+        }
+        vm.prank(owner);
+        if (rest == 0) {
+            vm.expectRevert(HamsterRaces.NoRefundableRewards.selector);
+            races.reclaimRewards(raceId, owner);
+            return;
+        }
+        assertEq(races.reclaimRewards(raceId, owner), rest);
+        assertEq(rest, REWARD - race.lossRewardPool, "sponsor share != R - P");
+        vm.prank(owner);
+        vm.expectRevert(HamsterRaces.NoRefundableRewards.selector);
+        races.reclaimRewards(raceId, owner);
+    }
+
     uint256 internal totalStaked_;
+    uint256 internal lossPool_;
     uint256 internal winningStake_;
     uint256 internal losingStake_;
 
@@ -83,6 +115,8 @@ contract HamsterRacesPayoutFuzzTest is RaceTestBase {
         totalStaked_ = races.getRace(raceId).totalStaked;
         winningStake_ = races.stakes(raceId, winner);
         losingStake_ = totalStaked_ - winningStake_;
+        lossPool_ = REWARD * losingStake_ / totalStaked_;
+        assertEq(races.getRace(raceId).lossRewardPool, lossPool_, "loss pool != floor(R * L / T)");
         uint256[] memory order = _order(amounts.length, orderSeed);
         uint256 ethOut;
         uint256 rewardOut;
@@ -94,7 +128,7 @@ contract HamsterRacesPayoutFuzzTest is RaceTestBase {
             rewardOut += reward;
         }
         assertEq(ethOut, totalStaked_, "winners did not split the whole pot");
-        assertEq(rewardOut, losingStake_ == 0 ? 0 : REWARD, "losers did not split the whole budget");
+        assertEq(rewardOut, lossPool_, "losers did not split exactly the loss pool");
     }
 
     function _claimAndCheck(uint256 i, uint256 amount, bool won, uint256 n)
@@ -110,10 +144,11 @@ contract HamsterRacesPayoutFuzzTest is RaceTestBase {
             assertGe(ethAmount, amount, "winner received less than own stake");
             assertEq(reward, 0);
         } else {
-            uint256 fairReward = REWARD * amount / losingStake_;
+            uint256 fairReward = lossPool_ * amount / losingStake_;
             assertEq(ethAmount, 0);
             assertGe(reward, fairReward, "loser short-changed");
             assertLe(reward, fairReward + n, "loser overpaid beyond dust");
+            assertLe(reward, REWARD * amount / totalStaked_ + n, "loser paid above R / T per losing wei");
         }
     }
 
@@ -132,6 +167,13 @@ contract HamsterRacesPayoutFuzzTest is RaceTestBase {
             races.placeBet{value: amounts[i]}(raceId, i == 0 ? 1 : 2);
         }
         _settle(1);
+        uint256 staked;
+        for (uint256 i; i <= losers; ++i) {
+            staked += amounts[i];
+        }
+        uint256 pool = budget * (staked - amounts[0]) / staked;
+        HamsterRaces.Race memory race = races.getRace(raceId);
+        assertEq(race.lossRewardPool, pool);
         uint256[] memory order = _order(losers + 1, orderSeed);
         uint256 total;
         for (uint256 k; k <= losers; ++k) {
@@ -139,7 +181,17 @@ contract HamsterRacesPayoutFuzzTest is RaceTestBase {
             (, uint256 reward) = races.claim(raceId, payable(_bettor(order[k])));
             total += reward;
         }
-        assertEq(total, budget);
+        assertEq(total, pool);
+        assertEq(races.getRace(raceId).lossRewardRemaining, 0);
+        // A nonzero pool locks the sponsor's share until resolveBy; a pool rounded to zero does not.
+        vm.prank(owner);
+        if (pool != 0) {
+            vm.expectRevert(HamsterRaces.NoRefundableRewards.selector);
+            races.reclaimRewards(raceId, owner);
+            vm.warp(race.resolveBy);
+            vm.prank(owner);
+        }
+        assertEq(races.reclaimRewards(raceId, owner), budget - pool);
         // Only the untouched setUp race's escrow remains.
         assertEq(token.balanceOf(address(races)), REWARD);
         assertEq(races.rewardLiability(), REWARD);
@@ -147,6 +199,21 @@ contract HamsterRacesPayoutFuzzTest is RaceTestBase {
         vm.prank(owner);
         vm.expectRevert(HamsterRaces.NoRefundableRewards.selector);
         races.reclaimRewards(raceId, owner);
+    }
+
+    /// @dev budget - pool is never zero (the winner always holds stake), so reclaim always has something.
+    function test_TinyBudgetRoundsLossPoolToZeroAndIsReclaimableAtOnce() public {
+        closesAt = uint64(block.timestamp + 1 hours);
+        raceId = _create(keccak256("one unit"), 2, 1);
+        _bet(alice, 1, 1 ether);
+        _bet(bob, 2, 1 ether);
+        _settle(1);
+        assertEq(races.getRace(raceId).lossRewardPool, 0);
+        (, uint256 reward) = _claim(bob);
+        assertEq(reward, 0);
+        vm.prank(owner);
+        assertEq(races.reclaimRewards(raceId, owner), 1);
+        _assertSolvent();
     }
 
     /// forge-config: default.fuzz.runs = 1000
