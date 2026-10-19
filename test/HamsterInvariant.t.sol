@@ -131,8 +131,8 @@ contract RaceHandler is Test {
 
     function _reclaim(uint256 id) private {
         HamsterRaces.Race memory race = races.getRace(id);
-        if (race.status == HamsterRaces.Status.Open || race.rewardsRemaining == 0) return;
-        if (race.status == HamsterRaces.Status.Settled && race.totalStaked != races.stakes(id, race.winner)) return;
+        if (race.status == HamsterRaces.Status.Open || race.rewardsRemaining == race.lossRewardRemaining) return;
+        if (race.status == HamsterRaces.Status.Settled && race.lossRewardPool != 0 && block.timestamp < race.resolveBy) return;
         reclaimedRewards += races.reclaimRewards(id, address(this));
     }
 }
@@ -172,6 +172,12 @@ contract HamsterInvariantTest is Test {
             totalRewardsRemaining += race.rewardsRemaining;
             assertLe(race.ethRemaining, race.totalStaked);
             assertLe(race.rewardsRemaining, race.rewardBudget);
+            assertLe(race.lossRewardRemaining, race.rewardsRemaining);
+            assertLe(race.lossRewardRemaining, race.lossRewardPool);
+            if (race.status == HamsterRaces.Status.Settled) {
+                uint256 losing = race.totalStaked - races.stakes(id, race.winner);
+                assertEq(race.lossRewardPool, race.rewardBudget * losing / race.totalStaked);
+            }
         }
         assertEq(races.ethLiability(), totalEthRemaining);
         assertEq(races.rewardLiability(), totalRewardsRemaining);

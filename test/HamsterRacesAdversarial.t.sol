@@ -125,7 +125,7 @@ contract HamsterRacesAdversarialTest is RaceTestBase {
         _bet(alice, 1, 1 ether);
         _bet(bob, 2, 1 ether);
         _settle(1);
-        vm.mockCall(address(token), abi.encodeCall(IERC20.transfer, (bob, REWARD)), abi.encode(false));
+        vm.mockCall(address(token), abi.encodeCall(IERC20.transfer, (bob, REWARD / 2)), abi.encode(false));
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(token)));
         races.claim(raceId, payable(bob));
@@ -135,8 +135,8 @@ contract HamsterRacesAdversarialTest is RaceTestBase {
         assertEq(races.getRace(raceId).loserStakeRemaining, 1 ether);
         vm.clearMockedCalls();
         _claim(bob);
-        assertEq(token.balanceOf(bob), REWARD);
-        assertEq(races.rewardLiability(), 0);
+        assertEq(token.balanceOf(bob), REWARD / 2);
+        assertEq(races.rewardLiability(), REWARD / 2);
         _assertSolvent();
     }
 

@@ -47,6 +47,8 @@ contract HamsterRaces is Ownable2Step, ReentrancyGuard {
         uint256 rewardsRemaining;
         uint256 winnerStakeRemaining;
         uint256 loserStakeRemaining;
+        uint256 lossRewardPool;
+        uint256 lossRewardRemaining;
     }
 
     struct Bet {
@@ -208,7 +210,13 @@ contract HamsterRaces is Ownable2Step, ReentrancyGuard {
         } else {
             race.status = Status.Settled;
             race.winnerStakeRemaining = winningStake;
-            race.loserStakeRemaining = race.totalStaked - winningStake;
+            uint256 losingStake = race.totalStaked - winningStake;
+            race.loserStakeRemaining = losingStake;
+            // Losers earn at most rewardBudget / totalStaked per losing wei. The winning side's share of the
+            // budget is never paid out, so covering every hamster can never capture the whole budget.
+            uint256 lossRewardPool = Math.mulDiv(race.rewardBudget, losingStake, race.totalStaked);
+            race.lossRewardPool = lossRewardPool;
+            race.lossRewardRemaining = lossRewardPool;
         }
     }
 
@@ -245,9 +253,10 @@ contract HamsterRaces is Ownable2Step, ReentrancyGuard {
             race.winnerStakeRemaining -= bet.amount;
         } else {
             hamsterAmount = bet.amount == race.loserStakeRemaining
-                ? race.rewardsRemaining
-                : Math.mulDiv(race.rewardBudget, bet.amount, race.totalStaked - stakes[raceId][race.winner]);
+                ? race.lossRewardRemaining
+                : Math.mulDiv(race.lossRewardPool, bet.amount, race.totalStaked - stakes[raceId][race.winner]);
             race.loserStakeRemaining -= bet.amount;
+            race.lossRewardRemaining -= hamsterAmount;
         }
 
         race.ethRemaining -= ethAmount;
@@ -262,18 +271,19 @@ contract HamsterRaces is Ownable2Step, ReentrancyGuard {
         }
     }
 
-    /// @notice Only the original sponsor can reclaim rewards when the race is void or has no losers.
+    /// @notice Only the original sponsor can reclaim rewards not owed to losers: the whole budget of a void race
+    ///         or one with no losers, and the winning side's unused share of a settled race once resolveBy passes.
     /// @dev There is no sweep of bettor claims, no claim expiry, and no withdrawal of active budgets.
     function reclaimRewards(uint256 raceId, address recipient) external nonReentrant returns (uint256 amount) {
         _checkRecipient(recipient);
         Race storage race = _finalRace(raceId);
         if (msg.sender != race.sponsor) revert NotSponsor();
-        if (race.status == Status.Settled && race.totalStaked != stakes[raceId][race.winner]) {
+        if (race.status == Status.Settled && race.lossRewardPool != 0 && block.timestamp < race.resolveBy) {
             revert NoRefundableRewards();
         }
-        amount = race.rewardsRemaining;
+        amount = race.rewardsRemaining - race.lossRewardRemaining;
         if (amount == 0) revert NoRefundableRewards();
-        race.rewardsRemaining = 0;
+        race.rewardsRemaining -= amount;
         rewardLiability -= amount;
         emit RewardsReclaimed(raceId, recipient, amount);
         hamster.safeTransfer(recipient, amount);

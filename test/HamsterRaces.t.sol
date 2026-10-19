@@ -34,9 +34,13 @@ contract HamsterRacesTest is RaceTestBase {
         assertEq(reward, 0);
         (ethAmount, reward) = _claim(bob);
         assertEq(ethAmount, 0);
-        assertEq(reward, REWARD / 3);
+        // Losers share R * L / T = 1000 * 6 / 10; bob holds 2 of the 6 losing ETH.
+        assertEq(reward, 200 ether);
         _claim(carol);
         _claim(dave);
+        vm.warp(closesAt + races.RESULT_WINDOW());
+        vm.prank(owner);
+        assertEq(races.reclaimRewards(raceId, owner), 400 ether);
 
         assertEq(alice.balance, 101.5 ether);
         assertEq(carol.balance, 104.5 ether);
@@ -44,8 +48,9 @@ contract HamsterRacesTest is RaceTestBase {
         assertEq(dave.balance, 96 ether);
         assertEq(token.balanceOf(alice), 0);
         assertEq(token.balanceOf(carol), 0);
-        assertEq(token.balanceOf(bob), REWARD / 3);
-        assertEq(token.balanceOf(dave), REWARD - REWARD / 3);
+        assertEq(token.balanceOf(bob), 200 ether);
+        assertEq(token.balanceOf(dave), 400 ether);
+        assertEq(token.balanceOf(owner), 1_000_000 ether - REWARD + 400 ether);
         assertEq(address(races).balance, 0);
         assertEq(token.balanceOf(address(races)), 0);
         assertEq(races.ethLiability(), 0);
@@ -81,9 +86,15 @@ contract HamsterRacesTest is RaceTestBase {
         assertEq(alicePayout + carolPayout, total);
         assertGe(alicePayout, total * aStake / (aStake + cStake));
         assertGe(carolPayout, total * cStake / (aStake + cStake));
-        assertEq(token.balanceOf(bob) + token.balanceOf(dave), REWARD);
-        assertGe(token.balanceOf(bob), REWARD * bStake / (bStake + dStake));
-        assertGe(token.balanceOf(dave), REWARD * dStake / (bStake + dStake));
+        uint256 lossPool = REWARD * (bStake + dStake) / total;
+        assertEq(token.balanceOf(bob) + token.balanceOf(dave), lossPool);
+        assertGe(token.balanceOf(bob), lossPool * bStake / (bStake + dStake));
+        assertGe(token.balanceOf(dave), lossPool * dStake / (bStake + dStake));
+        vm.warp(closesAt + races.RESULT_WINDOW());
+        if (lossPool != REWARD) {
+            vm.prank(owner);
+            assertEq(races.reclaimRewards(raceId, owner), REWARD - lossPool);
+        }
         assertEq(address(races).balance, 0);
         assertEq(token.balanceOf(address(races)), 0);
         assertEq(races.ethLiability(), 0);
@@ -92,17 +103,22 @@ contract HamsterRacesTest is RaceTestBase {
     }
 
     function test_SmallestRewardUnitsAndDustAreAccountedFor() public {
-        raceId = _create(keccak256("one minor unit reward"), 2, 1);
+        raceId = _create(keccak256("five minor unit reward"), 2, 5);
         _bet(alice, 1, 1);
         _bet(bob, 2, 1);
         _bet(carol, 2, 1);
         _settle(1);
+        // Loss pool floor(5 * 2 / 3) = 3: bob floor(3 / 2) = 1, carol the dust-inclusive remainder 2.
         (, uint256 firstReward) = _claim(bob);
         (, uint256 lastReward) = _claim(carol);
-        assertEq(firstReward, 0);
-        assertEq(lastReward, 1);
+        assertEq(firstReward, 1);
+        assertEq(lastReward, 2);
         (uint256 ethAmount,) = _claim(alice);
         assertEq(ethAmount, 3);
+        vm.warp(closesAt + races.RESULT_WINDOW());
+        vm.prank(owner);
+        assertEq(races.reclaimRewards(raceId, owner), 2);
+        assertEq(races.rewardLiability(), REWARD);
         _assertSolvent();
     }
 
@@ -182,7 +198,7 @@ contract HamsterRacesTest is RaceTestBase {
         vm.prank(bob);
         races.claim(raceId, payable(dave));
         assertEq(carol.balance, 102 ether);
-        assertEq(token.balanceOf(dave), REWARD);
+        assertEq(token.balanceOf(dave), REWARD / 2);
         assertEq(alice.balance, 99 ether);
         assertEq(token.balanceOf(bob), 0);
     }
@@ -197,13 +213,17 @@ contract HamsterRacesTest is RaceTestBase {
         _claim(alice);
         _claim(bob);
         assertEq(address(races).balance, 7 ether);
-        assertEq(token.balanceOf(address(races)), 2 * REWARD);
+        // Bob's 3 of 5 ETH lost earns 600; the first race's unused 400 waits for its sponsor.
+        assertEq(token.balanceOf(bob), 600 ether);
+        assertEq(token.balanceOf(address(races)), 2 * REWARD + 400 ether);
         vm.warp(closesAt + races.RESULT_WINDOW());
         races.cancelRace(secondId);
         vm.prank(carol);
         races.claim(secondId, payable(carol));
         vm.prank(owner);
         races.reclaimRewards(secondId, owner);
+        vm.prank(owner);
+        races.reclaimRewards(raceId, owner);
         assertEq(carol.balance, 100 ether);
         assertEq(address(races).balance, 0);
         assertEq(token.balanceOf(address(races)), 0);
@@ -220,7 +240,10 @@ contract HamsterRacesTest is RaceTestBase {
         (uint256 ethAmount,) = _claim(alice);
         (, uint256 reward) = _claim(bob);
         assertEq(ethAmount, 3 ether);
-        assertEq(reward, REWARD);
+        assertEq(reward, REWARD * 2 / 3);
+        vm.warp(closesAt + races.RESULT_WINDOW());
+        vm.prank(owner);
+        races.reclaimRewards(raceId, owner);
         assertEq(address(races).balance, 5 ether);
         assertEq(token.balanceOf(address(races)), 11 ether);
         assertEq(races.ethLiability(), 0);

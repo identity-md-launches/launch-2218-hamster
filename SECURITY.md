@@ -26,7 +26,10 @@ arbitrary rebasing or fee-on-transfer token.
 The oracle model is explicitly trusted reporting of external events. No
 timestamp, block hash, user seed, or DEX price decides valuable outcomes.
 Reporter malice and multiple-address reward farming are trust/economic risks
-described in the README. Timeout cancellation addresses unavailable reporters,
+described in the README. Loss rewards are capped at `R * L / T`, so a bettor
+covering every hamster cannot capture the whole budget; the winning side's
+share returns to the sponsor after `resolveBy`, and unclaimed loss rewards
+stay reserved for losers. Timeout cancellation addresses unavailable reporters,
 not dishonest reports. There is no external randomness or price feed to mock
 or misrepresent as production verification.
 

@@ -28,8 +28,10 @@ lottery or a trustless sports oracle.
 
 ETH is the betting asset. Rewards are existing HAMSTER voluntarily escrowed by
 the owner for each race. Neither betting nor losing can mint more HAMSTER.
-Payouts are pari-mutuel: winners share the ETH pot and losers share the reward
-budget in proportion to their stakes. There is no fixed price, guaranteed
+Payouts are pari-mutuel: winners share the ETH pot and losers share part of the
+reward budget in proportion to their stakes. Each losing wei earns at most
+`rewardBudget / totalStaked` HAMSTER; the winning side's share of the budget goes
+back to the sponsor. There is no fixed price, guaranteed
 exchange rate, fixed odds, or application fee. Additional bets change the
 eventual proportions until entry closes.
 
@@ -126,9 +128,12 @@ To operate a race:
 6. Each bettor calls `claim(raceId, recipient)` from the betting address.
    Winners receive ETH, losers receive HAMSTER, and cancelled bets receive their
    full ETH stake. Contract wallets can choose a recipient that accepts ETH.
-7. If a race is cancelled or has no losing bets, its original sponsor calls
-   `reclaimRewards(raceId, recipient)` to recover unused HAMSTER. Anyone can
-   trigger timeout cancellation; there is no keeper-only dependency.
+7. The original sponsor calls `reclaimRewards(raceId, recipient)` to recover
+   HAMSTER that no loser is owed: the whole budget of a cancelled race or of a
+   race with no losing bets, at any time, and the winning side's share
+   `R - floor(R * L / T)` of a settled race with losing bets, at or after
+   `resolveBy`. Unclaimed loss rewards are never reclaimable. Anyone can trigger
+   timeout cancellation; there is no keeper-only dependency.
 
 There are no further deployment settings, subscriptions, prices, or fee rates.
 Reward budgets and race schedules are per-event inputs, publicly fixed before
@@ -148,6 +153,7 @@ promised HAMSTER-per-ETH rate.
 | Reporter cancellation | Allowed any time while the race is not final |
 | Public timeout cancellation | Allowed at `now >= resolveBy` |
 | Claims | One per bettor, no expiry, no privileged sweep |
+| Sponsor reclaim, settled race with losers | At `now >= resolveBy`, winning side's share only |
 
 The participant and time bounds above are implementation choices. Timestamps
 gate deadlines only; they never supply randomness or choose the winner.
@@ -163,7 +169,9 @@ For a settled race with total ETH stake `T`, winning stake `W`, losing stake
 `L = T - W`, HAMSTER budget `R`, and an individual stake `s`:
 
 - Winning ETH share: `floor(T * s / W)`.
-- Losing HAMSTER share: `floor(R * s / L)`.
+- Loss reward pool: `P = floor(R * L / T)`, fixed at settlement. The remaining
+  `R - P` is the sponsor's, reclaimable at or after `resolveBy`.
+- Losing HAMSTER share: `floor(P * s / L)`, which is at most `R * s / T`.
 - The last claimant **within each group** receives that group's remainder,
   including rounding dust. Arithmetic uses full-precision `Math.mulDiv`.
 - A very small losing stake may round down to zero minor units. Splitting bets
@@ -175,8 +183,9 @@ sponsor can recover all rewards. Cancelled races never pay loss rewards.
 Refunds are exactly the original stake, independent of claim order.
 
 For example, bets of 1 ETH and 3 ETH on the winner share a 10 ETH pot as 2.5 ETH
-and 7.5 ETH. Losing bets of 2 ETH and 4 ETH share a 1,000 HAMSTER reward budget
-in a 1:2 ratio, with any minor-unit dust assigned to the last losing claimant.
+and 7.5 ETH. Losing bets of 2 ETH and 4 ETH share `1,000 * 6 / 10 = 600` HAMSTER
+of a 1,000 HAMSTER budget as 200 and 400, with any minor-unit dust assigned to the
+last losing claimant. The sponsor recovers the other 400 at `resolveBy`.
 
 `ethLiability` and `rewardLiability` track unwithdrawn obligations across all
 races. Round balances and remaining stake weights are updated before any
@@ -202,9 +211,24 @@ operational coverage. A lost or silent reporter causes refunds at timeout;
 a dishonest reporter can misallocate the ETH pot and HAMSTER reward budget.
 
 One address is not one person: users can bet on multiple hamsters using multiple
-addresses, including deliberate losing bets to compete for rewards. The sponsor
-must account for that incentive when funding races. Loss rewards do not promise
+addresses, including deliberate losing bets to compete for rewards. The contract
+cannot tell that several addresses are one actor, and there is no application fee,
+so **covering every hamster is a hedge with no ETH risk**: alone in a race, the
+hedger's winning address gets all of its ETH back. The loss-reward cap bounds what
+such a hedge earns. Its losing addresses earn `R / T` per losing wei, the same
+rate as every honest loser, so it can never take the whole budget, and the
+winning side's share returns to the sponsor. It still collects `R * L / T` at no
+ETH cost. That is `(N - 1) / N` of the budget for a lone hedger with equal stakes
+on `N` hamsters, and in a race with other bettors a large hedge dilutes honest
+losers by raising `T`. Sponsors should size budgets with that in mind: treat
+`R * (N - 1) / N` as obtainable risk-free by anyone. Loss rewards do not promise
 profit, compensation equal to an ETH loss, or any market value.
+
+The reporter and the sponsor are not excluded from betting, so the reporter can
+hold a position in a race it settles. The owner has no veto over an open race;
+only the race's reporter, or anyone after `resolveBy`, can cancel it. Entry stays
+open until `closesAt` whatever the real event's schedule is, so the owner must set
+`closesAt` before the physical race starts.
 
 Only send ETH through `placeBet` and fund HAMSTER through `createRace`.
 Unsolicited ERC-20 transfers and forcibly sent ETH are not credited to bets or
