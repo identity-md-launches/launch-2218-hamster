@@ -1,0 +1,32 @@
+{
+  "kind": "custom_token",
+  "token": {
+    "contract": "HamsterToken",
+    "name": "HAMSTER",
+    "symbol": "HAMSTER",
+    "decimals": 18,
+    "constructorArgs": [],
+    "totalSupply": "1000000000000000000000000000"
+  },
+  "contracts": [
+    {
+      "contract": "HamsterRaces",
+      "constructorArgs": [
+        "$token",
+        "$requester"
+      ]
+    }
+  ],
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "economics": {
+    "poolBps": 5000,
+    "initialMarketCapWei": "5000000000000000000000",
+    "remainderTo": "0xee2aaa315cf7ed169f93148d30d24af9318dbb66"
+  },
+  "notes": "HamsterToken is a plain fixed-supply OpenZeppelin ERC-20 named HAMSTER (symbol HAMSTER, 18 decimals). Its constructor takes no arguments and mints 1,000,000,000 tokens (1000000000000000000000000000 minor units) once to msg.sender, the factory. It has no owner, no further mint, no burn entry point, no transfer fee, no pause, no blacklist, no proxy and no upgrade path, so every launch flow (factory to distributor, seed into the PoolManager, remainder to the requester, claims and swaps) moves exactly the stated amount. HamsterRaces implements 'bet on hamster, lose to earn $HAMSTER': bettors stake ETH on externally run hamster races, a trusted result reporter configured by the owner attests each outcome, winners share the ETH pot pari-mutuel and losers share a HAMSTER reward budget the owner escrows per race through createRace. Its constructor takes the HAMSTER token ($token) and its owner ($requester, the economics remainder recipient), reverts on a zero token, makes no external calls and receives no token allocation at launch; it only holds HAMSTER the owner later deposits as race rewards. The owner must call setResultReporter after launch before any race can be created. Ownership is Ownable2Step; the factory is never the owner."
+}
